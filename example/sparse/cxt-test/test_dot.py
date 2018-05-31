@@ -141,21 +141,18 @@ def test_csrT_dns_dns_score(shape_lhs, shape_rhs, dev, repeat_num=50):
 
 
 if __name__ == "__main__":
-    # print('test dot(csr.T, dns)=dns on cpu')
-    # testBug(mx.cpu())
-    # print('test dot(csr.T, dns)=dns on gpu')
-    # testBug(mx.gpu())
     # check_dot_determinism('csr', 'default', 0.5, 1.0, True, False, dev=mx.cpu(), forward_stype='default')
     # print('check dot determinism is passed on cpu')
     # check_dot_determinism('csr', 'default', 0.5, 1.0, True, False, dev=mx.gpu(), forward_stype='default')
     # print('check dot determinism is passed on gpu')
+    
     shape_lhs = (256, 30000)
     shape_rhs = (30000, 30000)
     test_dns_csr_dns_score(shape_lhs, shape_rhs, mx.cpu(), repeat_num=50)
     test_dns_csrT_dns_score(shape_lhs, shape_rhs, mx.cpu(), repeat_num=50)
 
-    shape_lhs = (30000, 30000)
-    shape_rhs = (30000, 256)
-    test_csrT_dns_dns_score(shape_lhs, shape_rhs, mx.gpu(), repeat_num=50)
+    # shape_lhs = (3000, 3000)
+    # shape_rhs = (3000, 3000)
+    # test_csrT_dns_dns_score(shape_lhs, shape_rhs, mx.gpu(), repeat_num=50)
 
 
