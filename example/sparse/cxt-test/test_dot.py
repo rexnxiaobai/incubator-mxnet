@@ -4,16 +4,7 @@ import numpy as np
 import time
 import scipy
 
-def testBug(dev):
-    shape_lhs = (200, 200)
-    shape_rhs = (200, 200)
-    mx_sparse = rand_ndarray(shape_lhs, 'csr', density=0.01).as_in_context(dev)
-    mx_dns = rand_ndarray(shape_rhs, 'default', density=1.0).as_in_context(dev)
-
-    mx.nd.dot(mx_sparse, mx_dns, transpose_a=True, transpose_b=False
-              , forward_stype='default')
-    mx.nd.waitall()
-
+# test the bug of dot(csr.T, dns)=dns on gpu
 def check_dot_determinism(lhs_stype, rhs_stype, lhs_density, rhs_density
     , transpose_a, transpose_b, dev, forward_stype='default'):
     lhs_shape = (200, 200)
@@ -109,11 +100,8 @@ def testCorrectnessAndPerformance(lhs, rhs, lhs_transpose=False, rhs_transpose=F
                                  , transpose_a=lhs_transpose, transpose_b=rhs_transpose)
     return sparse_cost, dns_cost, fallback_cost
 
-def benchmark_score(dev, repeat_num=50):
-    shape_lhs = (256, 30000)
-    shape_rhs = (30000, 30000)
-
-    # test dot(dns1, csr) = dns2
+# test dot(dns1, csr) = dns2
+def test_dns_csr_dns_score(shape_lhs, shape_rhs, dev, repeat_num=50):
     print('---test dot(dns1, csr) = dns2, shape_lhs=(%d,%d), shape_rhs=(%d,%d)---'
           %(shape_lhs[0], shape_lhs[1], shape_rhs[0], shape_rhs[1]))
     lhs = create_data(shape_lhs, dev=dev)
@@ -123,10 +111,12 @@ def benchmark_score(dev, repeat_num=50):
             lhs, rhs, forward_stype='default',repeat_num=repeat_num)
         print("%.2f %% with fallback: %.6f, without fallback: %.6f"% (density * 100,
              (dns_cost + fallback_cost) / sparse_cost, dns_cost / sparse_cost))
+    mx.nd.waitall()
 
-    # test dot(dns1, csr.T) = dns2
+# test dot(dns1, csr.T) = dns2
+def test_dns_csrT_dns_score(shape_lhs, shape_rhs, dev, repeat_num=50):
     print('---test dot(dns1, csr.T) = dns2, shape_lhs=(%d,%d), shape_rhs=(%d,%d)---'
-          %(shape_lhs[0], shape_lhs[1], shape_rhs[0], shape_rhs[1]))\
+          %(shape_lhs[0], shape_lhs[1], shape_rhs[0], shape_rhs[1]))
     lhs = create_data(shape_lhs, dev=dev)
     for density in [0.01, 0.005, 0.001, 0.0005, 0.0001]:
         rhs = create_data(shape_rhs, dev=dev, stype='csr', density=density)
@@ -134,7 +124,19 @@ def benchmark_score(dev, repeat_num=50):
             lhs, rhs, rhs_transpose=True, forward_stype='default', repeat_num=repeat_num)
         print("%.2f %% with fallback: %.6f, without fallback: %.6f"% (density * 100,
              (dns_cost + fallback_cost) / sparse_cost, dns_cost / sparse_cost))
+    mx.nd.waitall()
 
+# test dot(csr.T, dns1) = dns2
+def test_csrT_dns_dns_score(shape_lhs, shape_rhs, dev, repeat_num=50):
+    print('---test dot(csr.T, dns1) = dns2, shape_lhs=(%d,%d), shape_rhs=(%d,%d)---'
+          %(shape_lhs[0], shape_lhs[1], shape_rhs[0], shape_rhs[1]))
+    rhs = create_data(shape_rhs, dev=dev)
+    for density in [0.01, 0.005, 0.001, 0.0005, 0.0001]:
+        lhs = create_data(shape_lhs, dev=dev, stype='csr', density=density)
+        sparse_cost, dns_cost, fallback_cost = testCorrectnessAndPerformance(
+            lhs, rhs, lhs_transpose=True, forward_stype='default', repeat_num=repeat_num)
+        print("%.2f %% with fallback: %.6f, without fallback: %.6f"% (density * 100,
+             (dns_cost + fallback_cost) / sparse_cost, dns_cost / sparse_cost))
     mx.nd.waitall()
 
 
@@ -147,6 +149,13 @@ if __name__ == "__main__":
     # print('check dot determinism is passed on cpu')
     # check_dot_determinism('csr', 'default', 0.5, 1.0, True, False, dev=mx.gpu(), forward_stype='default')
     # print('check dot determinism is passed on gpu')
-    benchmark_score(mx.cpu(), repeat_num=50)
-    # benchmark_score(mx.gpu(), repeat_num=10)
+    shape_lhs = (256, 30000)
+    shape_rhs = (30000, 30000)
+    test_dns_csr_dns_score(shape_lhs, shape_rhs, mx.cpu(), repeat_num=50)
+    test_dns_csrT_dns_score(shape_lhs, shape_rhs, mx.cpu(), repeat_num=50)
+
+    shape_lhs = (30000, 30000)
+    shape_rhs = (30000, 256)
+    test_csrT_dns_dns_score(shape_lhs, shape_rhs, mx.gpu(), repeat_num=50)
+
 
