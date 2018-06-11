@@ -290,6 +290,53 @@ struct DotCsrTransDnsDnsWarpBlockKernel {
 };
 
 /*!
+ * \brief GPU kernel of dot(csr.T, dns1) = dns2
+ * Parallelization by nzz*num_cols_r, this actually paralleled
+ * by output matrix elements: 1 thread/element
+ */
+struct DotCsrTransDnsDnsKernel {
+  /*!
+   * \brief
+   * \param tid              global thread id
+   * \param out              output rsp matrix data
+   * \param sorted_indices   csr matrix column indices in sorted order
+   * \param nnz              number of non-zeros in csr matrix
+   * \param original_idx     original indices to the unsorted csr column indices
+   * \param rhs              dns rhs data
+   * \param val_array        csr matrix data
+   * \param idx_array        csr matrix row indices
+   * \param row_length       length of a row in the output matrix
+   */
+  template<typename DType, typename IType>
+  __device__ __forceinline__ static void Map(int thread_id,
+                                             DType* out,
+                                             const IType* sorted_indices,
+                                             const nnvm::dim_t nnz,
+                                             const IType* original_idx,
+                                             const DType* rhs,
+                                             const DType* val_array,
+                                             const IType* idx_array,
+                                             const nnvm::dim_t row_length) {
+    int tid = thread_id / row_length;
+    const nnvm::dim_t offset = thread_id % row_length;
+    if (tid == 0 || sorted_indices[tid - 1] != sorted_indices[tid]) {
+      DType acc = 0;
+      const IType src_row_idx = sorted_indices[tid];
+      const IType out_offset = src_row_idx * row_length + offset;
+      do {
+        const IType idx = original_idx[tid];
+        const DType val = val_array[idx];
+        const DType col_idx = idx_array[idx];
+        const IType rhs_offset = col_idx * row_length + offset;
+        acc += rhs[rhs_offset] * val;
+        tid++;
+      } while (tid < nnz && sorted_indices[tid - 1] == sorted_indices[tid]);
+      out[out_offset] = acc;
+    }
+  }
+};
+
+/*!
  * \brief GPU Kernel of dot(csr.T, rsp1) = rsp2
  * Parallelization by rows: 1 thread/row
  * TODO: write a faster kernel optimized for GPU
@@ -492,6 +539,13 @@ struct DotDnsCsrTransDnsKernel {
   }
 };
 
+// Returns integer log2(a) rounded up
+inline int log2i(size_t a) {
+  int k = 1;
+  while (a >>= 1) k++;
+  return k;
+}
+
 /*!
  * \brief GPU Impl of dot(csr, dns1) = dns2 and dot(csr.T, dns1) = dns2
  */
@@ -514,6 +568,14 @@ inline void DotCsrDnsDnsImpl(const OpContext& ctx,
   using mxnet_op::Kernel;
   using mxnet_op::set_zero;
   using nnvm::dim_t;
+
+  // added for case 5,6
+  using mshadow::Shape1;
+  using mshadow::Tensor;
+  using namespace csr;
+  size_t nnz = lhs.aux_data(kIdx).Size();
+  const dim_t num_cols_l = lhs.shape()[1];
+  /////////
 
   const dim_t num_rows_l = lhs.shape()[0];
   const dim_t num_cols_r = rhs.shape_[1];
@@ -545,7 +607,8 @@ inline void DotCsrDnsDnsImpl(const OpContext& ctx,
           // (2) 'Warp kernel'         (one warp         computing one lhs column for one rhs column )
           // (3) 'Thread block kernel' (one thread block computing one lhs column for all rhs columns)
           // (4) 'Warp block kernel'   (one warp         computing one lhs column for all rhs columns)
-          const int kernel_version = 0;
+          // const int kernel_version = 0;
+          const int kernel_version = 5;
           switch (kernel_version) {
             case 1:
               num_threads = data_out.Size();
@@ -572,6 +635,168 @@ inline void DotCsrDnsDnsImpl(const OpContext& ctx,
               Kernel<DotCsrTransDnsDnsWarpBlockKernel, gpu>::Launch(s, num_threads,
                   data_out.dptr<DType>(), data_l.dptr<DType>(), indptr_l.dptr<IType>(),
                   col_idx_l.dptr<CType>(), data_r.dptr<DType>(), num_cols_r);
+              break;
+            case 5:
+              {
+                // this implementation can be roughly divided into two parts:
+                // 1. convert csr to coo;
+                // 2. call the DotCsrTransDnsDnsKernel kernel Paralleled by nnz*num_cols_r,
+                //    this actually paralleled by elements in the output matrix. And many 
+                //    threads have no workload. 
+
+                IType* col_idx_l_ptr = col_idx_l.dptr<IType>();
+                // temporary memory layout
+                IType* original_idx_ptr = nullptr;
+                IType* row_idx_ptr = nullptr;
+                IType* col_idx_copy_ptr = nullptr;
+                char* temp_storage_ptr = nullptr;
+
+                // estimate temp space for unique.
+                const size_t nnr_bytes = sizeof(size_t);
+                cudaStream_t stream = mshadow::Stream<gpu>::GetStream(s);
+                // the temp storage for sort and unique
+                size_t original_idx_bytes = nnz * sizeof(IType);
+                size_t row_idx_bytes = nnz * sizeof(IType);
+                size_t col_idx_copy_bytes = nnz * sizeof(IType);
+                size_t sort_temp_bytes = SortByKeyWorkspaceSize<IType, IType, gpu>(nnz);
+                size_t total_temp_bytes = sort_temp_bytes;
+
+                // layout: original_idx, col_idx_copy, temp_storage
+                size_t total_workspace_bytes = nnr_bytes + original_idx_bytes + row_idx_bytes +
+                                               col_idx_copy_bytes + total_temp_bytes;
+
+                // request temp space
+                Tensor<gpu, 1, char> workspace = ctx.requested[0]
+                    .get_space_typed<gpu, 1, char>(Shape1(total_workspace_bytes), s);
+                // update individual temp space ptrs
+                original_idx_ptr = reinterpret_cast<IType*>(workspace.dptr_ + nnr_bytes);
+                row_idx_ptr = reinterpret_cast<IType*>(workspace.dptr_ + nnr_bytes +
+                                                       original_idx_bytes);
+                col_idx_copy_ptr = reinterpret_cast<IType*>(workspace.dptr_ + nnr_bytes +
+                                                            original_idx_bytes + row_idx_bytes);
+                temp_storage_ptr = workspace.dptr_ + nnr_bytes + original_idx_bytes +
+                                   row_idx_bytes + col_idx_copy_bytes;
+
+                // Fill original_idx
+                Kernel<range_fwd, gpu>::Launch(
+                  s, nnz, 1, IType(0), IType(1), kWriteTo, original_idx_ptr);
+                // Make a copy of col_idx_l
+                Kernel<mxnet_op::op_with_req<mshadow_op::identity, kWriteTo>, gpu>::Launch(
+                  s, nnz, col_idx_copy_ptr, col_idx_l_ptr);
+
+                // Construct the tensors needed for SortByKey
+                Tensor<gpu, 1, IType> col_idx_copy(col_idx_copy_ptr, Shape1(nnz), s);
+                Tensor<gpu, 1, IType> original_idx(original_idx_ptr, Shape1(nnz), s);
+                Tensor<gpu, 1, char> temp_storage(temp_storage_ptr, Shape1(total_temp_bytes), s);
+
+                int num_bits = log2i(num_cols_l - 1);
+                SortByKey(col_idx_copy, original_idx, true, &temp_storage, 0, num_bits);
+
+                // Scatter csr indptr to row id
+                Kernel<CsrRowScatterKernel, gpu>::Launch(
+                  s, num_rows_l, indptr_l.dptr<IType>(), row_idx_ptr, num_rows_l);
+
+                Kernel<DotCsrTransDnsDnsKernel, gpu>::Launch(s, nnz * num_cols_r,
+                       data_out.dptr<DType>(), col_idx_copy_ptr, nnz,
+                       original_idx_ptr, data_r.dptr<DType>(),
+                       data_l.dptr<DType>(),
+                       row_idx_ptr, num_cols_r);
+              }
+              break;
+            case 6:
+              {
+                // this implementation can be roughly divided into two parts:
+                // 1. convert csr to csc;
+                // 2. call the implementation of dot(csr,dns)=dns. 
+                //    that is DotCsrDnsDnsScalarKernel kernel.
+
+                const dim_t num_csr_rows = num_rows_l;
+                const dim_t num_csr_cols = num_cols_l;
+                // convert csr to csc
+                IType* original_idx_ptr = nullptr;
+                IType* csc_indices_ptr = nullptr;
+                IType* csc_cols_ptr = nullptr;
+                CType* csr_rows_ptr = nullptr;
+                CType* csc_indptr_ptr = nullptr;
+                DType* csc_data_ptr = nullptr;
+                char* temp_storage_ptr = nullptr;
+                size_t original_idx_bytes = nnz*sizeof(IType);
+                size_t csc_indices_bytes = nnz*sizeof(IType);
+                size_t csc_cols_bytes = nnz*sizeof(IType);
+                size_t csr_rows_bytes = nnz*sizeof(CType);
+                size_t csc_indptr_bytes = (num_csr_cols+1)*sizeof(CType);
+                size_t csc_data_bytes = nnz*sizeof(DType);
+                size_t scan_temp_storage_bytes = 0;
+                size_t temp_storage_bytes = SortByKeyWorkspaceSize<IType, IType, gpu>(nnz);
+                IType* csr_indices_ptr = col_idx_l.dptr<IType>();
+                cub::DeviceScan::ExclusiveSum(temp_storage_ptr,
+                                              scan_temp_storage_bytes,
+                                              csc_indptr_ptr,
+                                              csc_indptr_ptr,
+                                              num_csr_cols+1,
+                                              mshadow::Stream<gpu>::GetStream(s));
+                temp_storage_bytes = std::max(temp_storage_bytes, scan_temp_storage_bytes);
+                temp_storage_bytes += (sizeof(dim_t) - temp_storage_bytes % sizeof(dim_t));
+                size_t total_workspace_bytes =
+                  original_idx_bytes + csc_indices_bytes + csc_cols_bytes + csr_rows_bytes +
+                  csc_indptr_bytes + csc_data_bytes + temp_storage_bytes;
+                total_workspace_bytes += (sizeof(IType) - total_workspace_bytes % sizeof(IType));
+                Tensor<gpu, 1, char> workspace = ctx.requested[0]
+                    .get_space_typed<gpu, 1, char>(Shape1(total_workspace_bytes), s);
+                original_idx_ptr = reinterpret_cast<IType*>(workspace.dptr_);
+                csc_indices_ptr = reinterpret_cast<IType*>(workspace.dptr_ + original_idx_bytes);
+                csc_cols_ptr = reinterpret_cast<IType*>(workspace.dptr_ + original_idx_bytes +
+                                                        csc_indices_bytes);
+                csr_rows_ptr = reinterpret_cast<CType*>(workspace.dptr_ + original_idx_bytes +
+                                                        csc_indices_bytes + csc_cols_bytes);
+                csc_indptr_ptr = reinterpret_cast<CType*>(workspace.dptr_ + original_idx_bytes +
+                                                          csc_indices_bytes + csc_cols_bytes +
+                                                          csr_rows_bytes);
+                temp_storage_ptr = workspace.dptr_ + original_idx_bytes + csc_indices_bytes +
+                                   csc_cols_bytes + csr_rows_bytes + csc_indptr_bytes;
+                csc_data_ptr = reinterpret_cast<DType*>(
+                                 workspace.dptr_ + total_workspace_bytes - csc_data_bytes);
+
+                // Fill original_idx
+                mxnet_op::Kernel<range_fwd, gpu>::Launch(
+                  s, nnz, 1, IType(0), IType(1), kWriteTo, original_idx_ptr);
+                // Fill csc_cols with copy of csr_indices
+                mxnet_op::Kernel<mxnet_op::op_with_req<mshadow_op::identity, kWriteTo>, gpu>::Launch(
+                  s, nnz, csc_cols_ptr, csr_indices_ptr);
+                // Allocate the tensors needed for SortByKey
+                Tensor<gpu, 1, IType> original_idx(original_idx_ptr, Shape1(nnz), s);
+                Tensor<gpu, 1, IType> csc_cols(csc_cols_ptr, Shape1(nnz), s);
+                Tensor<gpu, 1, char> temp_storage(temp_storage_ptr, Shape1(temp_storage_bytes), s);
+
+                int num_bits = log2i(num_csr_cols - 1);
+                SortByKey(csc_cols, original_idx, true, &temp_storage, 0, num_bits);
+
+                // Scatter csr indptr to row id
+                mxnet_op::Kernel<CsrRowScatterKernel, gpu>::Launch(
+                  s, num_csr_rows, indptr_l.dptr<CType>(), csr_rows_ptr, num_csr_rows);
+
+                // Reset indptr to zero
+                mxnet_op::Kernel<mxnet_op::set_zero, gpu>::Launch(s, num_csr_cols+1, csc_indptr_ptr);
+                // Histogram on the sorted cols
+                mxnet_op::Kernel<HistogramKernel, gpu>::Launch(
+                  s, nnz, csc_indptr_ptr, csc_cols_ptr, nnz);
+                // Scan the bin counts for every column to get csc_indptr
+                cub::DeviceScan::ExclusiveSum(temp_storage_ptr,
+                                              temp_storage_bytes,
+                                              csc_indptr_ptr,
+                                              csc_indptr_ptr,
+                                              num_csr_cols+1,
+                                              mshadow::Stream<gpu>::GetStream(s));
+                // Assign data to csc matrix arrays
+                mxnet_op::Kernel<CscDataIndicesKernel, gpu>::Launch(
+                  s, nnz, original_idx_ptr, data_l.dptr<DType>(), csr_rows_ptr, csc_data_ptr,
+                  csc_indices_ptr, nnz);
+
+                num_threads = data_out.Size();
+                mxnet_op::Kernel<DotCsrDnsDnsScalarKernel<kWriteTo>, gpu>::Launch(s, num_threads,
+                      data_out.dptr<DType>(), csc_data_ptr, csc_indptr_ptr,
+                      csc_indices_ptr, data_r.dptr<DType>(), num_cols_r);
+              }
               break;
             default:
               num_threads = threads_per_warp * num_rows_l * num_cols_r;
@@ -670,13 +895,6 @@ struct DotCsrTransDnsRspKernel {
     }
   }
 };
-
-// Returns integer log2(a) rounded up
-inline int log2i(size_t a) {
-  int k = 1;
-  while (a >>= 1) k++;
-  return k;
-}
 
 /*!
  * \brief GPU Impl of dot(csr.T, dns) = rsp
