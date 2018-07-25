@@ -49,11 +49,27 @@ except ImportError:
     SKLEARN_INSTALLED = False
 
 # Parameter to pass to batch_end_callback
+# BatchEndParam = namedtuple('BatchEndParams',
+#                            ['epoch',
+#                             'nbatch',
+#                             'eval_metric',
+#                             'locals'])
 BatchEndParam = namedtuple('BatchEndParams',
-                           ['epoch',
-                            'nbatch',
-                            'eval_metric',
-                            'locals'])
+                          ['epoch',
+                           'nbatch',
+                           'eval_metric',
+                           'locals',
+                           'rank',
+                           'total_iter',
+                           'cur_data_time',
+                           'avg_data_time',
+                           'cur_batch_time',
+                           'avg_batch_time',
+                           'cur_kvstore_sync_time',
+                           'avg_kvstore_sync_time',
+                           'cur_iter_total_time',
+                           'avg_iter_total_time'
+                           ])
 
 def _create_sparse_kvstore(kvstore):
     """Create kvstore assuming some parameters' storage types are row_sparse.

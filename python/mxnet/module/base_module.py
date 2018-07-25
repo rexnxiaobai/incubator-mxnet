@@ -77,6 +77,22 @@ def _parse_data_desc(data_names, label_names, data_shapes, label_shapes):
         _check_names_match(label_names, [], 'label', False)
     return data_shapes, label_shapes
 
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
 
 class BaseModule(object):
     """The base class of a module.
@@ -501,7 +517,16 @@ class BaseModule(object):
         ################################################################################
         # training loop
         ################################################################################
+
+        temp_count = 0
+
         for epoch in range(begin_epoch, num_epoch):
+            # added by cxt
+            train_time = AverageMeter()
+            kvstore_sync_time = AverageMeter()
+            get_data_time = AverageMeter()
+            iter_total_time = AverageMeter()
+
             tic = time.time()
             eval_metric.reset()
             nbatch = 0
@@ -509,11 +534,22 @@ class BaseModule(object):
             end_of_batch = False
             next_data_batch = next(data_iter)
             while not end_of_batch:
+            # while temp_count <= 1000:
+                # ndarray.waitall()
+                start_time = time.time()
+
                 data_batch = next_data_batch
                 if monitor is not None:
                     monitor.tic()
                 self.forward_backward(data_batch)
+
+                # ndarray.waitall()
+                train_time.update(time.time() - start_time)
+
                 self.update()
+
+                # ndarray.waitall()
+                kvstore_sync_time.update(time.time() - start_time)
 
                 if isinstance(data_batch, list):
                     self.update_metric(eval_metric,
@@ -529,19 +565,40 @@ class BaseModule(object):
                 except StopIteration:
                     end_of_batch = True
 
+                # ndarray.waitall()
+                get_data_time.update(time.time() - start_time)
+
                 if monitor is not None:
                     monitor.toc_print()
 
                 if end_of_batch:
                     eval_name_vals = eval_metric.get_name_value()
 
+                # ndarray.waitall()
+                iter_total_time.update(time.time() - start_time)
+
                 if batch_end_callback is not None:
+                    # batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
+                    #                                  eval_metric=eval_metric,
+                    #                                  locals=locals())
+
                     batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
                                                      eval_metric=eval_metric,
-                                                     locals=locals())
+                                                     locals=locals(),
+                                                     rank=kvstore.rank, total_iter=temp_count,
+                                                     cur_data_time=get_data_time.val, avg_data_time=get_data_time.avg,
+                                                     cur_batch_time=train_time.val, avg_batch_time=train_time.avg,
+                                                     cur_kvstore_sync_time=kvstore_sync_time.val,
+                                                     avg_kvstore_sync_time=kvstore_sync_time.avg,
+                                                     cur_iter_total_time=iter_total_time.val,
+                                                     avg_iter_total_time=iter_total_time.avg
+                                                     )
+
                     for callback in _as_list(batch_end_callback):
                         callback(batch_end_params)
                 nbatch += 1
+
+                temp_count += 1
 
             # one epoch of training is finished
             for name, val in eval_name_vals:
