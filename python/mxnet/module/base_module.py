@@ -31,7 +31,7 @@ from ..model import BatchEndParam
 from ..initializer import Uniform
 from ..io import DataDesc
 from ..base import _as_list
-
+from .. import profiler
 
 def _check_input_names(symbol, names, typename, throw):
     """Check that all input names are in symbol's arguments."""
@@ -517,115 +517,146 @@ class BaseModule(object):
         ################################################################################
         # training loop
         ################################################################################
-
-        temp_count = 0
-
-        for epoch in range(begin_epoch, num_epoch):
-            # added by cxt
-            train_time = AverageMeter()
-            kvstore_sync_time = AverageMeter()
-            get_data_time = AverageMeter()
-            iter_total_time = AverageMeter()
-
-            tic = time.time()
-            eval_metric.reset()
-            nbatch = 0
-            data_iter = iter(train_data)
-            end_of_batch = False
-            next_data_batch = next(data_iter)
-            while not end_of_batch:
-            # while temp_count <= 1000:
-                # ndarray.waitall()
-                start_time = time.time()
-
-                data_batch = next_data_batch
-                if monitor is not None:
-                    monitor.tic()
-                self.forward_backward(data_batch)
-
-                # ndarray.waitall()
-                train_time.update(time.time() - start_time)
-
+        profiler_name = 'profile_executor_5iter.json'
+        profiler.set_config(profile_symbolic=True, filename= profiler_name)
+        # dry run
+        data_iter = iter(train_data)
+        batch = next(data_iter)
+        dry_run = 10
+        isTrain = True
+        iterations = 5
+        for i in range(dry_run):
+            self.forward(batch, is_train=isTrain)
+            if isTrain:
+                self.backward()
                 self.update()
+            for output in self.get_outputs(merge_multi_context=False)[0]:
+                output.wait_to_read()
 
-                # ndarray.waitall()
-                kvstore_sync_time.update(time.time() - start_time)
+        t0 = time.clock()
 
-                if isinstance(data_batch, list):
-                    self.update_metric(eval_metric,
-                                       [db.label for db in data_batch],
-                                       pre_sliced=True)
-                else:
-                    self.update_metric(eval_metric, data_batch.label)
+        profiler.set_state('run')
+        # real run
+        for i in range(iterations):
+            self.forward(batch, is_train=isTrain)
+            if isTrain:
+                self.backward()
+                self.update()
+            for output in self.get_outputs(merge_multi_context=False)[0]:
+                output.wait_to_read()
+        profiler.set_state('stop')
+        ndarray.waitall()
+        t1 = time.clock()
+        print("executor {0} ms / iteration".format((t1 - t0)*1000.0 / iterations))
 
-                try:
-                    # pre fetch next batch
-                    next_data_batch = next(data_iter)
-                    self.prepare(next_data_batch, sparse_row_id_fn=sparse_row_id_fn)
-                except StopIteration:
-                    end_of_batch = True
-
-                # ndarray.waitall()
-                get_data_time.update(time.time() - start_time)
-
-                if monitor is not None:
-                    monitor.toc_print()
-
-                if end_of_batch:
-                    eval_name_vals = eval_metric.get_name_value()
-
-                # ndarray.waitall()
-                iter_total_time.update(time.time() - start_time)
-
-                if batch_end_callback is not None:
-                    # batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
-                    #                                  eval_metric=eval_metric,
-                    #                                  locals=locals())
-
-                    batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
-                                                     eval_metric=eval_metric,
-                                                     locals=locals(),
-                                                     rank=kvstore.rank, total_iter=temp_count,
-                                                     cur_data_time=get_data_time.val, avg_data_time=get_data_time.avg,
-                                                     cur_batch_time=train_time.val, avg_batch_time=train_time.avg,
-                                                     cur_kvstore_sync_time=kvstore_sync_time.val,
-                                                     avg_kvstore_sync_time=kvstore_sync_time.avg,
-                                                     cur_iter_total_time=iter_total_time.val,
-                                                     avg_iter_total_time=iter_total_time.avg
-                                                     )
-
-                    for callback in _as_list(batch_end_callback):
-                        callback(batch_end_params)
-                nbatch += 1
-
-                temp_count += 1
-
-            # one epoch of training is finished
-            for name, val in eval_name_vals:
-                self.logger.info('Epoch[%d] Train-%s=%f', epoch, name, val)
-            toc = time.time()
-            self.logger.info('Epoch[%d] Time cost=%.3f', epoch, (toc-tic))
-
-            # sync aux params across devices
-            arg_params, aux_params = self.get_params()
-            self.set_params(arg_params, aux_params)
-
-            if epoch_end_callback is not None:
-                for callback in _as_list(epoch_end_callback):
-                    callback(epoch, self.symbol, arg_params, aux_params)
-
-            #----------------------------------------
-            # evaluation on validation set
-            if eval_data:
-                res = self.score(eval_data, validation_metric,
-                                 score_end_callback=eval_end_callback,
-                                 batch_end_callback=eval_batch_end_callback, epoch=epoch)
-                #TODO: pull this into default
-                for name, val in res:
-                    self.logger.info('Epoch[%d] Validation-%s=%f', epoch, name, val)
-
-            # end of 1 epoch, reset the data-iter for another epoch
-            train_data.reset()
+        # temp_count = 0
+        #
+        # for epoch in range(begin_epoch, num_epoch):
+        #     # added by cxt
+        #     train_time = AverageMeter()
+        #     kvstore_sync_time = AverageMeter()
+        #     get_data_time = AverageMeter()
+        #     iter_total_time = AverageMeter()
+        #
+        #     tic = time.time()
+        #     eval_metric.reset()
+        #     nbatch = 0
+        #     data_iter = iter(train_data)
+        #     end_of_batch = False
+        #     next_data_batch = next(data_iter)
+        #     while not end_of_batch:
+        #     # while temp_count <= 1000:
+        #         # ndarray.waitall()
+        #         start_time = time.time()
+        #
+        #         data_batch = next_data_batch
+        #         if monitor is not None:
+        #             monitor.tic()
+        #         self.forward_backward(data_batch)
+        #
+        #         # ndarray.waitall()
+        #         train_time.update(time.time() - start_time)
+        #
+        #         self.update()
+        #
+        #         # ndarray.waitall()
+        #         kvstore_sync_time.update(time.time() - start_time)
+        #
+        #         if isinstance(data_batch, list):
+        #             self.update_metric(eval_metric,
+        #                                [db.label for db in data_batch],
+        #                                pre_sliced=True)
+        #         else:
+        #             self.update_metric(eval_metric, data_batch.label)
+        #
+        #         try:
+        #             # pre fetch next batch
+        #             next_data_batch = next(data_iter)
+        #             self.prepare(next_data_batch, sparse_row_id_fn=sparse_row_id_fn)
+        #         except StopIteration:
+        #             end_of_batch = True
+        #
+        #         # ndarray.waitall()
+        #         get_data_time.update(time.time() - start_time)
+        #
+        #         if monitor is not None:
+        #             monitor.toc_print()
+        #
+        #         if end_of_batch:
+        #             eval_name_vals = eval_metric.get_name_value()
+        #
+        #         # ndarray.waitall()
+        #         iter_total_time.update(time.time() - start_time)
+        #
+        #         if batch_end_callback is not None:
+        #             # batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
+        #             #                                  eval_metric=eval_metric,
+        #             #                                  locals=locals())
+        #
+        #             batch_end_params = BatchEndParam(epoch=epoch, nbatch=nbatch,
+        #                                              eval_metric=eval_metric,
+        #                                              locals=locals(),
+        #                                              rank=kvstore.rank, total_iter=temp_count,
+        #                                              cur_data_time=get_data_time.val, avg_data_time=get_data_time.avg,
+        #                                              cur_batch_time=train_time.val, avg_batch_time=train_time.avg,
+        #                                              cur_kvstore_sync_time=kvstore_sync_time.val,
+        #                                              avg_kvstore_sync_time=kvstore_sync_time.avg,
+        #                                              cur_iter_total_time=iter_total_time.val,
+        #                                              avg_iter_total_time=iter_total_time.avg
+        #                                              )
+        #
+        #             for callback in _as_list(batch_end_callback):
+        #                 callback(batch_end_params)
+        #         nbatch += 1
+        #
+        #         temp_count += 1
+        #
+        #     # one epoch of training is finished
+        #     for name, val in eval_name_vals:
+        #         self.logger.info('Epoch[%d] Train-%s=%f', epoch, name, val)
+        #     toc = time.time()
+        #     self.logger.info('Epoch[%d] Time cost=%.3f', epoch, (toc-tic))
+        #
+        #     # sync aux params across devices
+        #     arg_params, aux_params = self.get_params()
+        #     self.set_params(arg_params, aux_params)
+        #
+        #     if epoch_end_callback is not None:
+        #         for callback in _as_list(epoch_end_callback):
+        #             callback(epoch, self.symbol, arg_params, aux_params)
+        #
+        #     #----------------------------------------
+        #     # evaluation on validation set
+        #     if eval_data:
+        #         res = self.score(eval_data, validation_metric,
+        #                          score_end_callback=eval_end_callback,
+        #                          batch_end_callback=eval_batch_end_callback, epoch=epoch)
+        #         #TODO: pull this into default
+        #         for name, val in res:
+        #             self.logger.info('Epoch[%d] Validation-%s=%f', epoch, name, val)
+        #
+        #     # end of 1 epoch, reset the data-iter for another epoch
+        #     train_data.reset()
 
     ################################################################################
     # Symbol information
