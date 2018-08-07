@@ -22,6 +22,8 @@ import time
 import re
 import math
 import mxnet as mx
+import numpy as np
+
 
 def get_epoch_size(args, kv):
     return math.ceil(int(args.num_examples / kv.num_workers) / args.batch_size)
@@ -137,6 +139,16 @@ def add_fit_args(parser):
                        help='the ramping-up strategy for large batch sgd')
     return train
 
+def get_group_mask(out_channels, in_channels, num_group, dtype=None):
+    if dtype == 'float16':
+        mask = np.zeros((out_channels, in_channels, 3, 3), dtype=np.float16)
+    else:
+        mask = np.zeros((out_channels, in_channels, 3, 3), dtype=np.float32)
+    in_g_c = in_channels // num_group
+    out_g_c = out_channels // num_group
+    for idx in xrange(num_group):
+        mask[out_g_c*idx:out_g_c*(idx+1),in_g_c*idx:in_g_c*(idx+1)] = 1.0
+    return mask
 
 def fit(args, network, data_loader, **kwargs):
     """
@@ -297,6 +309,21 @@ def fit(args, network, data_loader, **kwargs):
     if 'batch_end_callback' in kwargs:
         cbs = kwargs['batch_end_callback']
         batch_end_callbacks += cbs if isinstance(cbs, list) else [cbs]
+
+    arg_params = {}
+    data_shape_dict = dict(train.provide_data + train.provide_label)
+    print train.provide_data, train.provide_label
+    arg_shape, out_shape, aux_shape = network.infer_shape(**data_shape_dict)
+    arg_shape_dict = dict(zip(network.list_arguments(), arg_shape))
+    out_shape_dict = zip(network.list_outputs(), out_shape)
+    aux_shape_dict = dict(zip(network.list_auxiliary_states(), aux_shape))
+    attrs = network.attr_dict()
+    for k in network.list_arguments():
+        if k.endswith('mask'):
+            out_channel, in_channel, _, _ = arg_shape_dict[k]
+            mask_init = get_group_mask(out_channel, in_channel, 32, dtype=None)
+            # print k, arg_shape_dict[k]
+            arg_params[k] = mx.nd.array(mask_init)
 
     # run
     model.fit(train,

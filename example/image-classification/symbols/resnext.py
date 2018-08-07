@@ -25,6 +25,15 @@ Saining Xie, Ross Girshick, Piotr Dollar, Zhuowen Tu, Kaiming He. "Aggregated Re
 import mxnet as mx
 import numpy as np
 
+
+def get_group_mask(out_channels, in_channels, num_group):
+    mask = np.zeros((out_channels, in_channels, 3, 3))
+    in_g_c = in_channels // num_group
+    out_g_c = out_channels // num_group
+    for idx in xrange(num_group):
+        mask[out_g_c*idx:out_g_c*(idx+1),in_g_c*idx:in_g_c*(idx+1)] = 1.0
+    return mask
+
 def residual_unit(data, num_filter, stride, dim_match, name, bottle_neck=True, num_group=32, bn_mom=0.9, workspace=256, memonger=False):
     """Return ResNet Unit symbol for building ResNet
     Parameters
@@ -55,6 +64,88 @@ def residual_unit(data, num_filter, stride, dim_match, name, bottle_neck=True, n
 
         conv2 = mx.sym.Convolution(data=act1, num_filter=int(num_filter*0.5), num_group=num_group, kernel=(3,3), stride=stride, pad=(1,1),
                                       no_bias=True, workspace=workspace, name=name + '_conv2')
+        bn2 = mx.sym.BatchNorm(data=conv2, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_bn2')
+        act2 = mx.sym.Activation(data=bn2, act_type='relu', name=name + '_relu2')
+
+
+        conv3 = mx.sym.Convolution(data=act2, num_filter=num_filter, kernel=(1,1), stride=(1,1), pad=(0,0), no_bias=True,
+                                   workspace=workspace, name=name + '_conv3')
+        bn3 = mx.sym.BatchNorm(data=conv3, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_bn3')
+
+        if dim_match:
+            shortcut = data
+        else:
+            shortcut_conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=(1,1), stride=stride, no_bias=True,
+                                            workspace=workspace, name=name+'_sc')
+            shortcut = mx.sym.BatchNorm(data=shortcut_conv, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_sc_bn')
+
+        if memonger:
+            shortcut._set_attr(mirror_stage='True')
+        eltwise =  bn3 + shortcut
+        return mx.sym.Activation(data=eltwise, act_type='relu', name=name + '_relu')
+    else:
+
+        conv1 = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=(3,3), stride=stride, pad=(1,1),
+                                      no_bias=True, workspace=workspace, name=name + '_conv1')
+        bn1 = mx.sym.BatchNorm(data=conv1, fix_gamma=False, momentum=bn_mom, eps=2e-5, name=name + '_bn1')
+        act1 = mx.sym.Activation(data=bn1, act_type='relu', name=name + '_relu1')
+
+
+        conv2 = mx.sym.Convolution(data=act1, num_filter=num_filter, kernel=(3,3), stride=(1,1), pad=(1,1),
+                                      no_bias=True, workspace=workspace, name=name + '_conv2')
+        bn2 = mx.sym.BatchNorm(data=conv2, fix_gamma=False, momentum=bn_mom, eps=2e-5, name=name + '_bn2')
+
+        if dim_match:
+            shortcut = data
+        else:
+            shortcut_conv = mx.sym.Convolution(data=data, num_filter=num_filter, kernel=(1,1), stride=stride, no_bias=True,
+                                            workspace=workspace, name=name+'_sc')
+            shortcut = mx.sym.BatchNorm(data=shortcut_conv, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_sc_bn')
+
+        if memonger:
+            shortcut._set_attr(mirror_stage='True')
+        eltwise = bn2 + shortcut
+        return mx.sym.Activation(data=eltwise, act_type='relu', name=name + '_relu')
+
+def residual_unit_group2normal(data, num_filter, stride, dim_match, name, bottle_neck=True, num_group=32, bn_mom=0.9, workspace=256, memonger=False):
+    """Return ResNet Unit symbol for building ResNet
+    Parameters
+    ----------
+    data : str
+        Input data
+    num_filter : int
+        Number of output channels
+    bnf : int
+        Bottle neck channels factor with regard to num_filter
+    stride : tuple
+        Stride used in convolution
+    dim_match : Boolean
+        True means channel number between input and output is the same, otherwise means differ
+    name : str
+        Base name of the operators
+    workspace : int
+        Workspace used in convolution operator
+    """
+    if bottle_neck:
+        # the same as https://github.com/facebook/fb.resnet.torch#notes, a bit difference with origin paper
+        if num_group == 32:
+            multiper_factor = 0.5
+        elif num_group == 64:
+            multiper_factor = 1.0
+
+        # in_channel = 64
+        # out_channel = int(num_filter * multiper_factor)
+        group_mask = mx.sym.Variable(name=name + '_conv2_mask', lr_mult=0, wd_mult=0)
+        group_weight = mx.sym.Variable(name=name + '_conv2_weight')
+        group_weight = group_weight * group_mask
+
+        conv1 = mx.sym.Convolution(data=data, num_filter=int(num_filter*multiper_factor), kernel=(1,1), stride=(1,1), pad=(0,0),
+                                      no_bias=True, workspace=workspace, name=name + '_conv1')
+        bn1 = mx.sym.BatchNorm(data=conv1, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_bn1')
+        act1 = mx.sym.Activation(data=bn1, act_type='relu', name=name + '_relu1')
+        conv2 = mx.sym.Convolution(data=act1, num_filter=int(num_filter * multiper_factor), weight=group_weight,
+                                   kernel=(3, 3), stride=stride, pad=(1, 1),
+                                   no_bias=True, workspace=workspace, name=name + '_conv2')
         bn2 = mx.sym.BatchNorm(data=conv2, fix_gamma=False, eps=2e-5, momentum=bn_mom, name=name + '_bn2')
         act2 = mx.sym.Activation(data=bn2, act_type='relu', name=name + '_relu2')
 
@@ -140,11 +231,11 @@ def resnext(units, num_stages, filter_list, num_classes, num_group, image_shape,
         body = mx.sym.Pooling(data=body, kernel=(3, 3), stride=(2,2), pad=(1,1), pool_type='max')
 
     for i in range(num_stages):
-        body = residual_unit(body, filter_list[i+1], (1 if i==0 else 2, 1 if i==0 else 2), False,
+        body = residual_unit_group2normal(body, filter_list[i+1], (1 if i==0 else 2, 1 if i==0 else 2), False,
                              name='stage%d_unit%d' % (i + 1, 1), bottle_neck=bottle_neck, num_group=num_group,
                              bn_mom=bn_mom, workspace=workspace, memonger=memonger)
         for j in range(units[i]-1):
-            body = residual_unit(body, filter_list[i+1], (1,1), True, name='stage%d_unit%d' % (i + 1, j + 2),
+            body = residual_unit_group2normal(body, filter_list[i+1], (1,1), True, name='stage%d_unit%d' % (i + 1, j + 2),
                                  bottle_neck=bottle_neck, num_group=num_group, bn_mom=bn_mom, workspace=workspace, memonger=memonger)
 
     pool1 = mx.sym.Pooling(data=body, global_pool=True, kernel=(7, 7), pool_type='avg', name='pool1')
