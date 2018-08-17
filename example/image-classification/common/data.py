@@ -38,6 +38,7 @@ def add_data_args(parser):
                       help='number of threads for data decoding')
     data.add_argument('--benchmark', type=int, default=0,
                       help='if 1, then feed the network with synthetic data')
+    data.add_argument('--data-dir', type=str, help='the whole dataset')
     return data
 
 def add_data_aug_args(parser):

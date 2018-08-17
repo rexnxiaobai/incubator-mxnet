@@ -23,6 +23,8 @@ from common import find_mxnet, data, fit
 from common.util import download_file
 import mxnet as mx
 
+from common import dali_imagenet
+
 if __name__ == '__main__':
     # parse args
     parser = argparse.ArgumentParser(description="train imagenet-1k",
@@ -55,4 +57,5 @@ if __name__ == '__main__':
     sym = net.get_symbol(**vars(args))
 
     # train
-    fit.fit(args, sym, data.get_rec_iter)
+    # fit.fit(args, sym, data.get_rec_iter)
+    fit.fit(args, sym, dali_imagenet.get_dali_iter)
