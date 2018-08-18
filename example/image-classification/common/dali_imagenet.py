@@ -34,7 +34,7 @@ class  HybridValPipe (Pipeline):
         self.input = ops.MXNetReader(path=[os.path.join(db_folder, "val.rec")], index_path=[os.path.join(db_folder, "val.idx")],
                                      random_shuffle=False, shard_id=device_id, num_shards=num_gpus)
         self.decode = ops.nvJPEGDecoder(device="mixed", output_type=types.RGB)
-        self.rs = ops.Resize(device="gpu", resize_x=256, resize_y=256)
+        self.rs = ops.Resize(device="gpu", resize_shorter=256)
         # self.rrc = ops.RandomResizedCrop(device="gpu", size=(224, 224))
         self.cmnp = ops.CropMirrorNormalize(device="gpu",
                                             output_dtype=types.FLOAT,
