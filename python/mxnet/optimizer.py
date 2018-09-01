@@ -701,7 +701,7 @@ class LBSGD(Optimizer):
     """
 
     def __init__(self, momentum=0.0, multi_precision=False, warmup_strategy='linear',
-                 warmup_epochs=5, batch_scale=1, updates_per_epoch=32, begin_epoch=0, num_epochs=60,
+                 warmup_epochs=5, batch_scale=1, updates_per_epoch=32, begin_epoch=0, num_epochs=60, eta=0.001,
                  **kwargs):
         super(LBSGD, self).__init__(**kwargs)
         logging.info('Running Large-Batch SGD Algorithm')
@@ -722,6 +722,8 @@ class LBSGD(Optimizer):
         # for adaptive lr
         self.adaptive = False
         self.admult = 1  # adaptation constant
+        # LARS coefficient eta = 0.001 (default)
+        self.eta = eta
 
     def create_state(self, index, weight):
         momentum = None
@@ -767,9 +769,15 @@ class LBSGD(Optimizer):
         """Returns a scaling factor for the learning rate for this layer
         default is 1
         """
-        weight2 = self._l2norm(weight)
-        grad2 = self._l2norm(g)
-        lars = math.sqrt(weight2 / (grad2 + wd * weight2 + 1e-18))
+        # weight2 = self._l2norm(weight)
+        # grad2 = self._l2norm(g)
+        # lars = math.sqrt(weight2 / (grad2 + wd * weight2 + 1e-18))
+
+        # lars = self.eta * weight2 / (grad2 + wd * weight2)
+        #      = self.eta / (grad2 / weight2 + wd)
+        weight2 = math.sqrt(self._l2norm(weight))
+        grad2 = math.sqrt(self._l2norm(g))
+        lars = self.eta * weight2 / (grad2 + wd * weight2)
         if lars < 0.01:
             lars = 0.01
         elif lars > 100:
