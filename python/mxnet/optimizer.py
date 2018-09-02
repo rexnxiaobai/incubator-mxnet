@@ -838,6 +838,9 @@ class LBSGD(Optimizer):
                 lbmult = self._get_lars(weight, grad, wd)
             else:
                 lbmult = self._get_lbmult(cgrad['num_cums'])
+            # DEBUG
+            print ('[added by cxt] %s lr:%.4f, ratio:%.4f' % (self.warmup_strategy, lr, lbmult))
+
             lr = lr * lbmult
             # do the regular sgd update flow
             kwargs = {'rescale_grad': self.rescale_grad}
