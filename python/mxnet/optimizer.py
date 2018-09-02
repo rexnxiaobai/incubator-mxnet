@@ -486,10 +486,12 @@ class SGD(Optimizer):
                 in 32-bit precision even if actual weights used in the model have lower precision.\
                 Turning this on can improve convergence and accuracy when training with float16.
     """
-    def __init__(self, momentum=0.0, lazy_update=True, **kwargs):
+    def __init__(self, momentum=0.0, lazy_update=True, isdebug=False, **kwargs):
         super(SGD, self).__init__(**kwargs)
         self.momentum = momentum
         self.lazy_update = lazy_update
+        # added by cxt
+        self.isdebug = isdebug
 
     def create_state_multi_precision(self, index, weight):
         weight_master_copy = None
@@ -510,12 +512,41 @@ class SGD(Optimizer):
             momentum = zeros(weight.shape, weight.context, dtype=weight.dtype, stype=stype)
         return momentum
 
+    def _get_lars(self, weight, g, wd):
+        """Returns a scaling factor for the learning rate for this layer
+        default is 1
+        """
+        # weight2 = self._l2norm(weight)
+        # grad2 = self._l2norm(g)
+        # lars = math.sqrt(weight2 / (grad2 + wd * weight2 + 1e-18))
+
+        # lars = self.eta * weight2 / (grad2 + wd * weight2)
+        #      = self.eta / (grad2 / weight2 + wd)
+        weight2 = math.sqrt(self._l2norm(weight))
+        grad2 = math.sqrt(self._l2norm(g))
+        lars = self.eta * weight2 / (grad2 + wd * weight2)
+        # if lars < 0.01:
+        #     lars = 0.01
+        # elif lars > 100:
+        #     lars = 100
+        return lars
+
+    def _l2norm(self, v):
+        "inner product implementation"
+        norm = multiply(v, v).asnumpy().sum()
+        return norm
+
     def _update_impl(self, index, weight, grad, state, multi_precision=False):
         assert(isinstance(weight, NDArray))
         assert(isinstance(grad, NDArray))
         self._update_count(index)
         lr = self._get_lr(index)
         wd = self._get_wd(index)
+
+        if self.isdebug:
+            lars_ratio = self._get_lars(weight, grad, wd)
+            print ('[added by cxt] sgd num_update: %d , lr: %.6f , ratio: %.6f' % (
+            self.num_update, lr, lars_ratio))
 
         kwargs = {'rescale_grad': self.rescale_grad}
         if self.momentum > 0:
@@ -545,6 +576,7 @@ class SGD(Optimizer):
         use_multi_precision = self.multi_precision and weight.dtype == numpy.float16
         self._update_impl(index, weight, grad, state,
                           multi_precision=use_multi_precision)
+
 
 @register
 class Signum(Optimizer):
@@ -701,7 +733,8 @@ class LBSGD(Optimizer):
     """
 
     def __init__(self, momentum=0.0, multi_precision=False, warmup_strategy='linear',
-                 warmup_epochs=5, batch_scale=1, updates_per_epoch=32, begin_epoch=0, num_epochs=60, eta=0.001,
+                 warmup_epochs=5, batch_scale=1, updates_per_epoch=32, begin_epoch=0, num_epochs=60,
+                 eta=0.001, isdebug=False,
                  **kwargs):
         super(LBSGD, self).__init__(**kwargs)
         logging.info('Running Large-Batch SGD Algorithm')
@@ -724,6 +757,7 @@ class LBSGD(Optimizer):
         self.admult = 1  # adaptation constant
         # LARS coefficient eta = 0.001 (default)
         self.eta = eta
+        self.isdebug = isdebug
 
     def create_state(self, index, weight):
         momentum = None
@@ -778,10 +812,10 @@ class LBSGD(Optimizer):
         weight2 = math.sqrt(self._l2norm(weight))
         grad2 = math.sqrt(self._l2norm(g))
         lars = self.eta * weight2 / (grad2 + wd * weight2)
-        if lars < 0.01:
-            lars = 0.01
-        elif lars > 100:
-            lars = 100
+        # if lars < 0.01:
+        #     lars = 0.01
+        # elif lars > 100:
+        #     lars = 100
         return lars
 
     def _l2norm(self, v):
@@ -839,7 +873,12 @@ class LBSGD(Optimizer):
             else:
                 lbmult = self._get_lbmult(cgrad['num_cums'])
             # DEBUG
-            print ('[added by cxt] %s lr:%.4f, ratio:%.4f' % (self.warmup_strategy, lr, lbmult))
+            if self.isdebug:
+                print ('[added by cxt] %s num_update: %d , lr: %.6f , ratio: %.6f' % (self.warmup_strategy, self.num_update, lr, lbmult))
+            if lbmult < 0.01:
+                lbmult = 0.01
+            elif lbmult > 100:
+                lbmult = 100
 
             lr = lr * lbmult
             # do the regular sgd update flow
