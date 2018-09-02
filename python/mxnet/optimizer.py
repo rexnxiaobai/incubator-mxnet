@@ -512,24 +512,11 @@ class SGD(Optimizer):
             momentum = zeros(weight.shape, weight.context, dtype=weight.dtype, stype=stype)
         return momentum
 
-    def _get_lars(self, weight, g, wd):
-        """Returns a scaling factor for the learning rate for this layer
-        default is 1
-        """
-        # weight2 = self._l2norm(weight)
-        # grad2 = self._l2norm(g)
-        # lars = math.sqrt(weight2 / (grad2 + wd * weight2 + 1e-18))
-
-        # lars = self.eta * weight2 / (grad2 + wd * weight2)
-        #      = self.eta / (grad2 / weight2 + wd)
+    def _get_w_g_ratio(self, weight, g, wd):
         weight2 = math.sqrt(self._l2norm(weight))
         grad2 = math.sqrt(self._l2norm(g))
-        lars = self.eta * weight2 / (grad2 + wd * weight2)
-        # if lars < 0.01:
-        #     lars = 0.01
-        # elif lars > 100:
-        #     lars = 100
-        return lars
+        w_g_ratio = weight2 / (grad2 + wd * weight2)
+        return w_g_ratio
 
     def _l2norm(self, v):
         "inner product implementation"
@@ -544,9 +531,9 @@ class SGD(Optimizer):
         wd = self._get_wd(index)
 
         if self.isdebug:
-            lars_ratio = self._get_lars(weight, grad, wd)
-            print ('[added by cxt] sgd num_update: %d , lr: %.6f , ratio: %.6f' % (
-            self.num_update, lr, lars_ratio))
+            w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
+            print ('[added by cxt] sgd num_update: %d , lr: %.6f , w_g_ratio: %.6f' % (
+            self.num_update, lr, w_g_ratio))
 
         kwargs = {'rescale_grad': self.rescale_grad}
         if self.momentum > 0:
@@ -799,6 +786,12 @@ class LBSGD(Optimizer):
                 mult = 1.0
         return mult
 
+    def _get_w_g_ratio(self, weight, g, wd):
+        weight2 = math.sqrt(self._l2norm(weight))
+        grad2 = math.sqrt(self._l2norm(g))
+        w_g_ratio = weight2 / (grad2 + wd * weight2)
+        return w_g_ratio
+
     def _get_lars(self, weight, g, wd):
         """Returns a scaling factor for the learning rate for this layer
         default is 1
@@ -869,12 +862,14 @@ class LBSGD(Optimizer):
         if (cgrad['num_cums'] % self.batch_scale) == 0:
             grad = cgrad['cum_grad'] / self.batch_scale
             if self.warmup_strategy == 'lars':
-                lbmult = self._get_lars(weight, grad, wd)
+                # lbmult = self._get_lars(weight, grad, wd)
+                lbmult = self._get_w_g_ratio(weight, grad, wd)
             else:
                 lbmult = self._get_lbmult(cgrad['num_cums'])
             # DEBUG
             if self.isdebug:
                 print ('[added by cxt] %s num_update: %d , lr: %.6f , ratio: %.6f' % (self.warmup_strategy, self.num_update, lr, lbmult))
+            lbmult = lbmult * self.eta
             if lbmult < 0.01:
                 lbmult = 0.01
             elif lbmult > 100:
