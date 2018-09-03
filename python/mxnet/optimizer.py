@@ -486,12 +486,14 @@ class SGD(Optimizer):
                 in 32-bit precision even if actual weights used in the model have lower precision.\
                 Turning this on can improve convergence and accuracy when training with float16.
     """
-    def __init__(self, momentum=0.0, lazy_update=True, isdebug=False, **kwargs):
+    def __init__(self, momentum=0.0, lazy_update=True, isdebug=False, islars=False, lars_eta=0.001, **kwargs):
         super(SGD, self).__init__(**kwargs)
         self.momentum = momentum
         self.lazy_update = lazy_update
         # added by cxt
         self.isdebug = isdebug
+        self.islars = islars
+        self.lars_eta = lars_eta
 
     def create_state_multi_precision(self, index, weight):
         weight_master_copy = None
@@ -532,8 +534,17 @@ class SGD(Optimizer):
 
         if self.isdebug:
             w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
-            print ('[added by cxt] sgd num_update: %d , lr: %.6f , w_g_ratio: %.6f' % (
-            self.num_update, lr, w_g_ratio))
+            print ('[added by cxt] sgd num_update: %d , index: %s , lr: %.6f , w_g_ratio: %.6f' % (
+            self.num_update, index, lr, w_g_ratio))
+        if self.islars:
+            w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
+            lars_ratio = self.lars_eta * w_g_ratio
+            if lars_ratio < 0.01:
+                lars_ratio = 0.01
+            elif lars_ratio > 100:
+                lars_ratio = 100
+            lr = lr * lars_ratio
+
 
         kwargs = {'rescale_grad': self.rescale_grad}
         if self.momentum > 0:
@@ -868,7 +879,8 @@ class LBSGD(Optimizer):
                 lbmult = self._get_lbmult(cgrad['num_cums'])
             # DEBUG
             if self.isdebug:
-                print ('[added by cxt] %s num_update: %d , lr: %.6f , ratio: %.6f' % (self.warmup_strategy, self.num_update, lr, lbmult))
+                print ('[added by cxt] %s num_update: %d , index: %s , lr: %.6f , ratio: %.6f' % (self.warmup_strategy,
+                                                                                                  self.num_update, index, lr, lbmult))
             lbmult = lbmult * self.eta
             if lbmult < 0.01:
                 lbmult = 0.01
