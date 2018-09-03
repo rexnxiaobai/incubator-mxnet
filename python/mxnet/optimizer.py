@@ -539,10 +539,10 @@ class SGD(Optimizer):
         if self.islars:
             w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
             lars_ratio = self.lars_eta * w_g_ratio
-            if lars_ratio < 0.01:
-                lars_ratio = 0.01
-            elif lars_ratio > 100:
-                lars_ratio = 100
+            if lars_ratio < 0:
+                lars_ratio = 0.0
+            elif lars_ratio > 50:
+                lars_ratio = 50
             lr = lr * lars_ratio
 
 
