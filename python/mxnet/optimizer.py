@@ -533,9 +533,12 @@ class SGD(Optimizer):
         wd = self._get_wd(index)
 
         if self.isdebug:
-            w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
-            print ('[added by cxt] sgd num_update: %d , index: %s , lr: %.6f , w_g_ratio: %.6f' % (
-            self.num_update, index, lr, w_g_ratio))
+            # w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
+            weight2 = math.sqrt(self._l2norm(weight))
+            grad2 = math.sqrt(self._l2norm(grad))
+            w_g_ratio = weight2 / (grad2 + wd * weight2)
+            print ('[added by cxt] sgd num_update: %d, lr: %.6f, w_g_ratio: %.6f, w: %.6f, dw: %.6f, idx2name: %s' % (
+            self.num_update, lr, w_g_ratio, weight2, grad2, self.idx2name[index]))
         if self.islars:
             w_g_ratio = self._get_w_g_ratio(weight, grad, wd)
             lars_ratio = self.lars_eta * w_g_ratio
